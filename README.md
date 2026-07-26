@@ -5,7 +5,7 @@
         <img src="https://img.shields.io/badge/Swift-6.2-orange.svg?style=flat" alt="Swift 6.2">
     </a>
     <a href="https://developer.apple.com/macos/" target="_blank">
-        <img src="https://img.shields.io/badge/Platforms-macOS%2026%2B-lightgray.svg?style=flat" alt="Platforms macOS 26+">
+        <img src="https://img.shields.io/badge/Platforms-macOS%2012%2B-lightgray.svg?style=flat" alt="Platforms macOS 12+">
     </a>
     <a href="LICENSE" target="_blank">
         <img src="https://img.shields.io/badge/License-Apache%202.0-lightgrey.svg?style=flat" alt="License Apache 2.0">
@@ -72,7 +72,7 @@ For anything beyond the basics below, see the
 ## Requirements
 
 - Swift 6.2 toolchain (`swift-tools-version: 6.2`, `.swiftLanguageMode(.v6)`)
-- macOS 26 or later (`Package.swift` declares `platforms: [.macOS(.v26)]`)
+- macOS 12 or later (`Package.swift` declares `platforms: [.macOS(.v12)]`)
 
 ## Installation
 

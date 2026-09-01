@@ -25,10 +25,10 @@ operate mail, or let Perfect-SMTP be the terminal MTA itself.
 > This is a complete rewrite of the pre-2026 libcurl-based Perfect-SMTP. If
 > you used the old `EMail`/`SMTPClient`/`Recipient` API, see
 > [Migrating from the old Perfect-SMTP](Documentation/user-guide.md#migrating-from-the-old-perfect-smtp)
-> in the user guide — this is not a drop-in upgrade.
+> in the user guide — this is not a drop-in upgrade. The old version is
+> preserved on the [`legacy`](../../tree/legacy) branch.
 
-This package is part of the [Perfect-Resurrection](https://github.com/taplin)
-ecosystem and is domain-agnostic by design — it has no Lasso-specific code
+This package is domain-agnostic by design — it has no Lasso-specific code
 and no Lasso dependency. It is, however, a **core dependency**:
 [Perfect-Lasso](https://github.com/taplin/Perfect-Lasso) — a Swift
 reimplementation of the Lasso language, still in active development and
@@ -76,13 +76,11 @@ For anything beyond the basics below, see the
 
 ## Installation
 
-Add the package to your `Package.swift`. This fork lives at
-`taplin/Perfect-SMTP`, not the original `PerfectlySoft/Perfect-SMTP`, and has
-no tagged releases yet, so pin a branch or a specific commit rather than a
-version range:
+Add the package to your `Package.swift`. No tagged releases exist yet, so pin a branch or a
+specific commit rather than a version range:
 
 ```swift
-.package(url: "https://github.com/taplin/Perfect-SMTP.git", branch: "main")
+.package(url: "https://github.com/PerfectlySoft/Perfect-SMTP.git", branch: "main")
 ```
 
 and depend on the `PerfectSMTP` product (it re-exports `PerfectSMTPCore`,

@@ -6,10 +6,16 @@
 //  (SendGrid/Postmark/SES issue API keys as SMTP passwords); `XOAuth2` is
 //  first-class and mandatory-in-practice for Gmail/Workspace (legacy SMTP
 //  password auth disabled since March 2025) and Microsoft 365 (Basic-auth
-//  SMTP being phased out through 2027). `SASLCramMD5`/`SASLScramSHA256` are
-//  deliberately not implemented — deferred per plan §4.5/§10.
+//  SMTP being phased out through 2027). `SASLScramSHA256` is deliberately
+//  not implemented — deferred per plan §4.5/§10.
+//
+//  Fork: `SASLCramMD5` and `SASLPasswordNegotiation` restore what Swift-SMTP
+//  did out of the box — pick the password mechanism from the server's own
+//  `AUTH` list — for servers that only offer LOGIN or CRAM-MD5 (Exchange
+//  on-premises advertises `AUTH NTLM LOGIN`, no PLAIN).
 //
 
+import Crypto
 import Foundation
 
 /// A SASL mechanism's message-exchange state machine, driven by
@@ -145,4 +151,79 @@ public struct XOAuth2: SASLMechanism {
     }
 
     public var isComplete: Bool { sentInitial }
+}
+
+/// RFC 2195 CRAM-MD5. No initial response; the server's single `334`
+/// challenge is answered with `username SP hex(HMAC-MD5(password, challenge))`.
+///
+/// Fork addition, for parity with Swift-SMTP. MD5 is weak and the server
+/// must keep a plaintext-equivalent secret, so prefer PLAIN or LOGIN over
+/// TLS; this exists for servers that offer nothing else, and is only ever
+/// chosen by `SASLPasswordNegotiation` when the server lists it first.
+public struct SASLCramMD5: SASLMechanism {
+    public let name = "CRAM-MD5"
+    public let username: String
+    public let password: String
+    private var answered = false
+
+    public init(username: String, password: String) {
+        self.username = username
+        self.password = password
+    }
+
+    public mutating func initialResponse() async throws -> [UInt8]? { nil }
+
+    public mutating func respond(to challenge: [UInt8]) async throws -> [UInt8] {
+        answered = true
+        let key = SymmetricKey(data: Array(password.utf8))
+        let digest = HMAC<Insecure.MD5>.authenticationCode(for: challenge, using: key)
+        let hex = digest.map { byte in
+            let value = String(byte, radix: 16)
+            return value.count == 1 ? "0" + value : value
+        }.joined()
+        return Array("\(username) \(hex)".utf8)
+    }
+
+    public var isComplete: Bool { answered }
+}
+
+/// Picks a password mechanism from the `AUTH` mechanisms a server advertised,
+/// the way Swift-SMTP did: the **first** one, in the server's own order, that
+/// this library can drive. Used by `RelayConfig.Auth.automatic`.
+///
+/// Fork addition. Deliberately:
+/// - token mechanisms (`XOAUTH2`, `OAUTHBEARER`) are never picked — a password
+///   is not a bearer token, and Swift-SMTP's default list did send it as one
+///   when a server happened to advertise `XOAUTH2` first;
+/// - there is no fallback to the next mechanism after a rejection: every
+///   failed attempt counts against directory lockout policies (Active
+///   Directory locks accounts after a few), so one attempt per connection;
+/// - nothing about the credentials is validated or rejected. The only
+///   adjustment is skipping `PLAIN` when either value contains a NUL byte,
+///   which PLAIN's NUL-separated framing cannot carry — LOGIN and CRAM-MD5
+///   can.
+public enum SASLPasswordNegotiation {
+    public static func mechanism(
+        username: String,
+        password: String,
+        advertised: [String]
+    ) throws -> any SASLMechanism {
+        for name in advertised {
+            switch name.uppercased() {
+            case "PLAIN":
+                if username.utf8.contains(0) || password.utf8.contains(0) { continue }
+                return SASLPlain(username: username, password: password)
+            case "LOGIN":
+                return SASLLogin(username: username, password: password)
+            case "CRAM-MD5":
+                return SASLCramMD5(username: username, password: password)
+            default:
+                continue
+            }
+        }
+        let offered = advertised.isEmpty ? "no AUTH extension" : advertised.joined(separator: " ")
+        throw SMTPError.authenticationFailed(
+            SMTPReply(code: 504, lines: ["No supported password AUTH mechanism (server offers: \(offered))"])
+        )
+    }
 }

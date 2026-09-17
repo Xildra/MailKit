@@ -18,6 +18,13 @@ public struct RelayConfig: Sendable {
         case plain(username: String, password: String)
         case login(username: String, password: String)
         case xoauth2(username: String, tokenProvider: @Sendable () async throws -> String)
+        /// Fork: username/password authentication with the mechanism chosen
+        /// from the server's post-TLS `AUTH` list, the way Swift-SMTP did —
+        /// see `SASLPasswordNegotiation` for the exact rules. Use this when
+        /// the server isn't known in advance: `.plain` alone fails against
+        /// servers that don't offer PLAIN (Exchange on-premises typically
+        /// advertises only `NTLM LOGIN`).
+        case automatic(username: String, password: String)
     }
 
     public var host: String
@@ -43,12 +50,18 @@ public struct RelayConfig: Sendable {
         self.pool = pool
     }
 
-    var mechanism: (any SASLMechanism)? {
+    /// The mechanism to run on a connection whose post-TLS EHLO advertised
+    /// `advertised`. Only `.automatic` actually consults it; the explicit
+    /// cases keep their upstream behavior (`SMTPConnection.authenticate`
+    /// rejects a mechanism the server didn't advertise).
+    func mechanism(advertised: [String]) throws -> (any SASLMechanism)? {
         switch auth {
         case .none: return nil
         case .plain(let username, let password): return SASLPlain(username: username, password: password)
         case .login(let username, let password): return SASLLogin(username: username, password: password)
         case .xoauth2(let username, let tokenProvider): return XOAuth2(username: username, tokenProvider: tokenProvider)
+        case .automatic(let username, let password):
+            return try SASLPasswordNegotiation.mechanism(username: username, password: password, advertised: advertised)
         }
     }
 }
@@ -118,7 +131,8 @@ public final class RelayTransport: SMTPTransport, Sendable {
             // A pooled connection is reused across many checkouts; only
             // authenticate once per connection (most servers reject a
             // second AUTH on an already-authenticated session).
-            if !connection.isAuthenticated, let mechanism = self.config.mechanism {
+            if !connection.isAuthenticated,
+               let mechanism = try self.config.mechanism(advertised: connection.capabilities.authMechanisms) {
                 try await connection.authenticate(mechanism)
             }
             return try await connection.sendMessage(envelope, message)

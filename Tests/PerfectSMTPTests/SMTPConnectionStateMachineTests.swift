@@ -278,6 +278,10 @@ struct SMTPConnectionStateMachineTests {
         try await serverSend(channel, "250 2.1.0 OK")
         try await serverSend(channel, "550 5.1.1 User unknown") // sole RCPT rejected
         try await serverSend(channel, "554 5.5.1 No valid recipients")
+        // Fork: the abandoned transaction is now reset before the
+        // connection can go back to the pool.
+        #expect(try await expectClientLine(channel) == "RSET")
+        try await serverSend(channel, "250 2.0.0 Reset OK")
 
         let results = try await sendTask
         #expect(results.count == 1)
@@ -286,8 +290,8 @@ struct SMTPConnectionStateMachineTests {
             return
         }
         // The body must never have been written -- confirmed by there
-        // being nothing left buffered beyond the three command lines +
-        // scripted replies above (no fourth outbound write to consume).
+        // being nothing left buffered beyond the three command lines,
+        // the RSET, and the scripted replies above.
         #expect(try await channel.readOutbound(as: ByteBuffer.self) == nil)
     }
 

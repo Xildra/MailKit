@@ -9,6 +9,7 @@
 
 import Foundation
 import NIOCore
+import NIOSSL
 
 /// Milestone review finding (documentation-only, no `Key` redesign this
 /// pass): `Key` is `(host, port, tls)` **only** -- it has no credential or
@@ -57,6 +58,23 @@ public actor SMTPConnectionPool {
         /// terminator, where the server may legitimately be doing real
         /// work (spooling/scanning a large message).
         public var dataTerminationTimeout: TimeInterval
+        /// Fork: TLS settings for every connection this pool dials (implicit
+        /// TLS and STARTTLS alike). Upstream never passed one, so NIOSSL's
+        /// client default applied — which still accepts TLS 1.0 and 1.1.
+        /// On iOS, App Transport Security does not cover raw sockets, so
+        /// nothing else enforced a floor either. Override to add trust
+        /// roots, pin certificates, or (only if a legacy server leaves no
+        /// choice) lower `minimumTLSVersion`.
+        public var tlsConfiguration: TLSConfiguration
+
+        /// Fork: NIOSSL's client configuration — full certificate and
+        /// hostname verification against the system trust store — with the
+        /// minimum raised to TLS 1.2 (RFC 8996 deprecates 1.0 and 1.1).
+        public static var defaultTLSConfiguration: TLSConfiguration {
+            var configuration = TLSConfiguration.makeClientConfiguration()
+            configuration.minimumTLSVersion = .tlsv12
+            return configuration
+        }
 
         public init(
             maxPerHost: Int = 4,
@@ -66,7 +84,8 @@ public actor SMTPConnectionPool {
             circuitBreakerThreshold: Int = 5,
             circuitBreakerResetTimeout: TimeInterval = 30,
             replyTimeout: TimeInterval = 300,
-            dataTerminationTimeout: TimeInterval = 600
+            dataTerminationTimeout: TimeInterval = 600,
+            tlsConfiguration: TLSConfiguration = Configuration.defaultTLSConfiguration
         ) {
             self.maxPerHost = maxPerHost
             self.maxTotal = maxTotal
@@ -76,6 +95,7 @@ public actor SMTPConnectionPool {
             self.circuitBreakerResetTimeout = circuitBreakerResetTimeout
             self.replyTimeout = replyTimeout
             self.dataTerminationTimeout = dataTerminationTimeout
+            self.tlsConfiguration = tlsConfiguration
         }
     }
 
@@ -171,10 +191,12 @@ public actor SMTPConnectionPool {
         let capturedHostname = ehloHostname
         let capturedReplyTimeout = configuration.replyTimeout
         let capturedDataTerminationTimeout = configuration.dataTerminationTimeout
+        let capturedTLSConfiguration = configuration.tlsConfiguration
         self.dialer = { key in
             let asyncChannel = try await SMTPBootstrap.connect(
                 host: key.host, port: key.port, tls: key.tls,
-                connectTimeout: capturedTimeout, group: capturedGroup
+                connectTimeout: capturedTimeout, tlsConfiguration: capturedTLSConfiguration,
+                group: capturedGroup
             )
             let connection = SMTPConnection(
                 asyncChannel: asyncChannel,

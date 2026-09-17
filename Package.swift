@@ -5,20 +5,33 @@ let package = Package(
     name: "PerfectSMTP",
     platforms: [
         .macOS(.v12),
+        // Fork: iOS was never declared upstream, and the package did not
+        // build for it (`LocalMTATransport` uses `Foundation.Process`).
+        .iOS(.v15),
     ],
     products: [
         .library(name: "PerfectSMTPCore", targets: ["PerfectSMTPCore"]),
         .library(name: "PerfectSMTP", targets: ["PerfectSMTP"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
+        // Fork: floors raised past known advisories. swift-nio 2.100.0 fixes
+        // CVE-2026-43671 (out-of-bounds write in `ByteBuffer`, which every
+        // SMTP reply goes through) and 2.101.0 fixes CVE-2026-43678.
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.101.0"),
+        // Fork: 2.37.2 fixes CVE-2026-43820, an out-of-bounds read on a
+        // certificate's subjectAltName -- reachable by the SMTP server
+        // during the TLS handshake, before its certificate is rejected.
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.2"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
         // Pinned to an exact version, not `from:` — `_CryptoExtras` (needed
         // for RSA-SHA256 DKIM signing) is an underscore-prefixed, semi-
         // stable SPI module per plan §4.6, so an unpinned range risks a
         // silent behavior/API change under this SPI on a routine update.
-        .package(url: "https://github.com/apple/swift-crypto.git", exact: "4.5.1"),
+        //
+        // Fork: `exact:` also blocked every security patch -- 4.5.1 is
+        // itself the fix for CVE-2026-43823. `upToNextMinor` keeps the SPI
+        // guard (no 4.6) while still picking up 4.5.x patch releases.
+        .package(url: "https://github.com/apple/swift-crypto.git", .upToNextMinor(from: "4.5.1")),
     ],
     targets: [
         // Foundation + Crypto/_CryptoExtras only. No NIO import — value
@@ -52,6 +65,8 @@ let package = Package(
             name: "PerfectSMTP",
             dependencies: [
                 "PerfectSMTPCore",
+                // Fork: HMAC-MD5 for `SASLCramMD5`.
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),

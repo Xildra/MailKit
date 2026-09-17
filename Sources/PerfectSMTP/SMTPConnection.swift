@@ -199,6 +199,9 @@ public final class SMTPConnection: @unchecked Sendable {
     /// `authenticate(_:)` again on a connection they didn't just dial.
     public private(set) var isAuthenticated = false
 
+    /// Fork: upper bound on `334` continuations in one AUTH exchange.
+    static let maximumSASLRounds = 8
+
     public func authenticate(_ mechanism: any SASLMechanism) async throws {
         guard capabilities.authMechanisms.contains(mechanism.name) else {
             throw SMTPError.authenticationFailed(
@@ -230,7 +233,18 @@ public final class SMTPConnection: @unchecked Sendable {
         }
         try await writeLine(line)
         var reply = try await nextReply()
+        var rounds = 0
         while reply.code == 334 {
+            // Fork: no real mechanism needs more than two continuations
+            // (LOGIN). Without a bound, a hostile server answering `334`
+            // forever kept this loop — and `SASLLogin`, which re-sends the
+            // password on every step past the first — spinning indefinitely.
+            rounds += 1
+            guard rounds <= Self.maximumSASLRounds else {
+                throw SMTPError.authenticationFailed(
+                    SMTPReply(code: 535, lines: ["Too many SASL continuation rounds for \(mechanism.name)"])
+                )
+            }
             guard let challengeText = reply.lines.first,
                   let challengeData = Data(base64Encoded: challengeText)
             else {
@@ -294,12 +308,16 @@ public final class SMTPConnection: @unchecked Sendable {
                 results.append(DeliveryResult(recipient: recipient, outcome: outcomeFor(reply)))
             }
         }
-        guard anyAccepted else { return results }
+        guard anyAccepted else {
+            await abandonTransaction(results: results, dataReply: nil)
+            return results
+        }
 
         try await writeLine("DATA")
         let dataReply = try await nextReply()
         guard dataReply.code == 354 else {
             let fallback = outcomeFor(dataReply)
+            await abandonTransaction(results: results, dataReply: dataReply)
             return remapAccepted(results, to: fallback)
         }
 
@@ -342,6 +360,7 @@ public final class SMTPConnection: @unchecked Sendable {
         // must never be sent (plan §4.3's corrected PIPELINING semantics).
         guard anyAccepted, dataReply.code == 354 else {
             let fallback = outcomeFor(dataReply)
+            await abandonTransaction(results: results, dataReply: dataReply)
             return remapAccepted(results, to: fallback)
         }
 
@@ -370,6 +389,63 @@ public final class SMTPConnection: @unchecked Sendable {
             finalOutcome = .ambiguous(nil)
         }
         return remapAccepted(results, to: finalOutcome)
+    }
+
+    /// Fork: a transaction that stopped before the DATA-terminating reply
+    /// (no recipient accepted, or DATA refused) is still open server-side,
+    /// and this connection goes back to the pool afterward — where the next
+    /// `MAIL FROM` would draw `503 nested MAIL command`. Upstream pooled it
+    /// as-is. Best effort, never throws: the caller already holds
+    /// per-recipient results worth returning.
+    ///
+    /// - A `421` anywhere means the server is closing the channel (RFC 5321
+    ///   §3.8): the channel is closed without waiting on replies that may
+    ///   never come.
+    /// - A pipelined DATA answered `354` although every RCPT was refused
+    ///   (RFC 2920 §3.1 says it shouldn't be, some servers do) leaves the
+    ///   channel in DATA mode, where the next message's commands would be
+    ///   read as body text and every later reply misattributed: the empty
+    ///   DATA phase is terminated first.
+    /// - Then `RSET` (RFC 5321 §4.1.1.5).
+    private func abandonTransaction(results: [DeliveryResult], dataReply: SMTPReply?) async {
+        let serverIsClosing = dataReply?.code == 421 || results.contains { result in
+            if case .queuedForRetry(_, _, let last) = result.outcome { return last.code == 421 }
+            return false
+        }
+        guard !serverIsClosing else {
+            try? await channel.close()
+            return
+        }
+        if dataReply?.code == 354 {
+            await endEmptyDataPhase()
+        }
+        await resetAbandonedTransaction()
+    }
+
+    /// `RSET`; if it fails, the channel is closed so the pool's
+    /// `channel.isActive` check drops the connection instead of reusing it.
+    private func resetAbandonedTransaction() async {
+        do {
+            try await writeLine("RSET")
+            let reply = try await nextReply()
+            if reply.replyClass != .positiveCompletion {
+                try? await channel.close()
+            }
+        } catch {
+            try? await channel.close()
+        }
+    }
+
+    /// Sends the lone `.` line (the client is already at the start of a
+    /// line, right after `DATA<CRLF>`) and consumes the server's reply to
+    /// it. Same failure handling as `resetAbandonedTransaction`.
+    private func endEmptyDataPhase() async {
+        do {
+            try await write(.raw(Array(".\r\n".utf8)))
+            _ = try await nextReply()
+        } catch {
+            try? await channel.close()
+        }
     }
 
     /// Replaces every tentatively-`.delivered` (i.e. RCPT-accepted) result

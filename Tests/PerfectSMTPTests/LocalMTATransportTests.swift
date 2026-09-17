@@ -16,6 +16,9 @@ import Foundation
 import Testing
 @testable import PerfectSMTP
 
+// Fork: see the matching guard in `LocalMTATransport.swift`.
+#if os(macOS) || os(Linux)
+
 struct LocalMTATransportTests {
 
     /// Writes a small, portable Python "fake MTA" script to a temp file
@@ -206,3 +209,5 @@ struct LocalMTATransportTests {
 private enum DeadlockGuardError: Error {
     case timedOut
 }
+
+#endif

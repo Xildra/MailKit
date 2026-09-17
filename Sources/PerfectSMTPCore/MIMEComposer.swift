@@ -639,9 +639,9 @@ public struct MIMEComposer: Sendable {
         let name = sanitizedFilename(attachment.filename)
         return MIMEPart(
             headers: [
-                ("Content-Type", "\(attachment.contentType); name=\"\(quotedParam(name))\""),
+                ("Content-Type", "\(attachment.contentType); \(filenameParameters("name", name, extended: false))"),
                 ("Content-Transfer-Encoding", "base64"),
-                ("Content-Disposition", "\(disposition.rawValue); filename=\"\(quotedParam(name))\""),
+                ("Content-Disposition", "\(disposition.rawValue); \(filenameParameters("filename", name, extended: true))"),
             ],
             body: .leaf(Array(Encoders.base64Wrapped(attachment.data).utf8))
         )
@@ -652,10 +652,10 @@ public struct MIMEComposer: Sendable {
         var headers: [(name: String, value: String)] = []
         if let filename = resource.filename {
             let name = sanitizedFilename(filename)
-            headers.append(("Content-Type", "\(resource.contentType); name=\"\(quotedParam(name))\""))
+            headers.append(("Content-Type", "\(resource.contentType); \(filenameParameters("name", name, extended: false))"))
             headers.append(("Content-Transfer-Encoding", "base64"))
             headers.append(("Content-ID", "<\(resource.contentID)>"))
-            headers.append(("Content-Disposition", "inline; filename=\"\(quotedParam(name))\""))
+            headers.append(("Content-Disposition", "inline; \(filenameParameters("filename", name, extended: true))"))
         } else {
             headers.append(("Content-Type", resource.contentType))
             headers.append(("Content-Transfer-Encoding", "base64"))
@@ -722,6 +722,47 @@ public struct MIMEComposer: Sendable {
 
     private func quotedParam(_ value: String) -> String {
         value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    /// Fork: `attribute="value"` for an already-sanitized filename.
+    ///
+    /// ASCII names are emitted exactly as upstream did. Upstream wrote
+    /// non-ASCII names as raw UTF-8 inside the header — 8-bit header bytes
+    /// with no SMTPUTF8 negotiated, which relays may mangle and receivers
+    /// show as mojibake (e.g. a French "Compte-rendu d'activité.pdf").
+    /// Those now get:
+    /// - an RFC 2047 encoded-word inside the quoted value — technically
+    ///   outside RFC 2047 §5, but what Swift-SMTP, Gmail and Outlook emit and
+    ///   what every mainstream client decodes;
+    /// - for `Content-Disposition`, the standard RFC 2231 `filename*`, which
+    ///   RFC 2231-aware readers prefer (placed last, per RFC 6266 §4.3).
+    private func filenameParameters(_ attribute: String, _ name: String, extended: Bool) -> String {
+        guard !name.utf8.allSatisfy({ $0 < 0x80 }) else {
+            return "\(attribute)=\"\(quotedParam(name))\""
+        }
+        var parameters = "\(attribute)=\"=?utf-8?B?\(Data(name.utf8).base64EncodedString())?=\""
+        if extended {
+            parameters += "; \(attribute)*=utf-8''\(Self.rfc2231PercentEncoded(name))"
+        }
+        return parameters
+    }
+
+    /// RFC 2231 §7 `attribute-char`s pass through; every other UTF-8 byte
+    /// becomes `%XX`.
+    private static func rfc2231PercentEncoded(_ value: String) -> String {
+        let unreserved = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$&+-.^_`|~".utf8)
+        let hexDigits = Array("0123456789ABCDEF".utf8)
+        var out: [UInt8] = []
+        for byte in value.utf8 {
+            if unreserved.contains(byte) {
+                out.append(byte)
+            } else {
+                out.append(UInt8(ascii: "%"))
+                out.append(hexDigits[Int(byte >> 4)])
+                out.append(hexDigits[Int(byte & 0x0F)])
+            }
+        }
+        return String(decoding: out, as: UTF8.self)
     }
 
     private func synthesizeMessageID() -> String {

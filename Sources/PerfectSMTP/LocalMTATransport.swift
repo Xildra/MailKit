@@ -21,6 +21,11 @@
 
 import Foundation
 
+// Fork: `Foundation.Process` does not exist on iOS/tvOS/watchOS/visionOS,
+// and this file alone kept the whole module from building there. The
+// transport is meaningless without a local MTA binary anyway.
+#if os(macOS) || os(Linux)
+
 public struct LocalMTAConfig: Sendable {
     /// Path to the MTA binary. Defaults to `sendmail`'s conventional
     /// location; `/usr/sbin/sendmail` is itself frequently a symlink to
@@ -372,3 +377,5 @@ final class NIOLockedBox<Value>: @unchecked Sendable {
         set { lock.lock(); defer { lock.unlock() }; _value = newValue }
     }
 }
+
+#endif

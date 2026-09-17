@@ -73,6 +73,14 @@ public enum MTASTSHTTPFetchError: Error, Sendable, Equatable {
     case notAnHTTPResponse
 }
 
+/// Fork: thrown by `URLSessionMTASTSFetcher` when a policy response grows
+/// past `URLSessionMTASTSFetcher.maximumPolicyBodySize`. A separate type
+/// rather than a new `MTASTSHTTPFetchError` case, so exhaustive `switch`es
+/// written against the upstream enum keep compiling.
+public struct MTASTSPolicyBodyTooLarge: Error, Sendable, Equatable {
+    public let limit: Int
+}
+
 /// The production `MTASTSHTTPFetching` implementation: a plain `URLSession`
 /// GET, default (fully-verified) TLS trust evaluation, no caching layer of
 /// its own (`MTASTSPolicyManager` is the cache; asking `URLSession` to also
@@ -114,18 +122,51 @@ public struct URLSessionMTASTSFetcher: MTASTSHTTPFetching {
         self.session = session
     }
 
+    /// Fork: largest policy body buffered. The fetched host is controlled by
+    /// whoever owns the recipient domain, and upstream read the whole
+    /// response into memory with no limit. Real policies are a few hundred
+    /// bytes; RFC 8461 §3.3 recommends senders cap the size (64 KiB).
+    public static let maximumPolicyBodySize = 64 * 1024
+
     public func fetch(url: URL) async throws -> MTASTSHTTPResponse {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        #if canImport(FoundationNetworking)
+        // swift-corelibs-foundation has no `bytes(for:)`: the limit can only
+        // be checked once the body is in, which still bounds what reaches
+        // the policy parser.
         let (data, response) = try await session.data(for: request, delegate: RedirectRefusingTaskDelegate())
         guard let http = response as? HTTPURLResponse else {
             throw MTASTSHTTPFetchError.notAnHTTPResponse
         }
+        guard data.count <= Self.maximumPolicyBodySize else {
+            throw MTASTSPolicyBodyTooLarge(limit: Self.maximumPolicyBodySize)
+        }
+        let body = Array(data)
+        #else
+        let (bytes, response) = try await session.bytes(for: request, delegate: RedirectRefusingTaskDelegate())
+        guard let http = response as? HTTPURLResponse else {
+            bytes.task.cancel()
+            throw MTASTSHTTPFetchError.notAnHTTPResponse
+        }
+        guard http.expectedContentLength <= Int64(Self.maximumPolicyBodySize) else {
+            bytes.task.cancel()
+            throw MTASTSPolicyBodyTooLarge(limit: Self.maximumPolicyBodySize)
+        }
+        var body: [UInt8] = []
+        for try await byte in bytes {
+            guard body.count < Self.maximumPolicyBodySize else {
+                bytes.task.cancel()
+                throw MTASTSPolicyBodyTooLarge(limit: Self.maximumPolicyBodySize)
+            }
+            body.append(byte)
+        }
+        #endif
         return MTASTSHTTPResponse(
             statusCode: http.statusCode,
             contentType: http.value(forHTTPHeaderField: "Content-Type"),
-            body: Array(data)
+            body: body
         )
     }
 }
